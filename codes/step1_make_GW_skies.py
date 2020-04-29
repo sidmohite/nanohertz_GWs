@@ -6,7 +6,7 @@ from __future__ import division
 import math
 from math import sqrt, cos, sin, pi
 import numpy as np
-import statsmodels.api as sm
+#import statsmodels.api as sm
 from scipy.interpolate import interp1d
 from scipy.integrate import quad
 import astropy
@@ -117,6 +117,31 @@ def time_to_c_wMc(chirp_mass, freq):
     ans = (pi*freq)**(-8/3)*(chirp_mass*s_mass)**(-5/3)*5/256
     return (ans/31556926)
 
+def ecc_integral(e):
+    return e**(29/19)*(1+(121./304)*e**2)**(1181/2299)/(1-e**2)**1.5
+
+def time_to_c_ecc(e0,q,Mtot,orb_freq):
+    """
+    time to coalescence for the eccentric case, from Peters (1964)
+    eqns. 5.11, 5.14. This is done via numerical integration and 
+    needs initial conditions (a0,e0)
+    """
+    a0 = (Mtot*s_mass/(2*pi*orb_freq)**2)**(1./3)
+    c0 = a0*(1-e0**2)/e0**(12/19)/(1+121./304*e0**2)**(870/2299)
+    m1 = Mtot*s_mass/(1+q)
+    m2 = q*m1
+    beta = 64/5*m1*m2*Mtot*s_mass
+    ans = 12/19*(c0**4/beta)*quad(ecc_integral,0,e0)[0]
+    return ans/31556926
+
+def time_to_c_ecc_approx(e0,q,Mtot,orb_freq):
+    a0 = (Mtot*s_mass/(2*pi*orb_freq)**2)**(1./3)
+    c0 = a0*(1-e0**2)/e0**(12/19)/(1+121./304*e0**2)**(870/2299)
+    m1 = Mtot*s_mass/(1+q)
+    m2 = q*m1
+    beta = 64/5*m1*m2*Mtot*s_mass
+    return c0**4/(4*beta)*e0**(48/19)/31556926
+
 def i_prob(q, Mtot, min_freq, total_T):
     """
     input time in years, Mtot in solar masses
@@ -224,6 +249,19 @@ def a_StarGW(Mstar,q,Mtot,gamma,H):
     ans = (num/deno)**(1/5)
     return ans
 
+def a_StarGW_ecc(Mstar,q,Mtot,gamma,H,e):
+    """
+    Eq. 6, Sesana & Khan 2015.
+    Answer in seconds
+    """
+    sigmaInf = sigmaVel(Mstar)*1000/c # km/s converted to m/s then /c for dimensionless units
+    rho_inf = rho_r(Mstar, gamma, r_inf(Mstar,gamma,Mtot)) #rinf in pc, rho_inf func converts
+    F_e = (1-e**2)**(-7./2)*(1+(73./24)*e**2 + (37./96)*e**4)
+    num = 64*sigmaInf*(q*(Mtot*s_mass)**3/(1+q)**2*F_e)
+    deno = 5*H*rho_inf
+    ans = (num/deno)**(1/5)
+    return ans
+
 def t_hard(Mstar,q,gamma,Mtot):
     """
     Hardening timescale with stars, Eq. 7 Sesana & Khan 2015
@@ -236,6 +274,20 @@ def t_hard(Mstar,q,gamma,Mtot):
     rinf_val = r_inf(Mstar,gamma,Mtot)
     rho_inf = rho_r(Mstar, gamma, rinf_val)
     ans = sigma_inf/(H*rho_inf*aStarGW)
+    return ans/31536000/1e9, rinf_val
+
+def t_hard_ecc(Mstar,q,gamma,Mtot,e):
+    """
+    Hardening timescale with stars, Eq. 7 Sesana & Khan 2015
+    Answer in Gyrs
+    """
+    a_val = parsec2sec(r0_sol(Mstar, gamma))
+    H = 15
+    aStarGW_ecc = a_StarGW_ecc(Mstar,q,Mtot,gamma,H,e) #check units
+    sigma_inf = sigmaVel(Mstar)*1000/c
+    rinf_val = r_inf(Mstar,gamma,Mtot)
+    rho_inf = rho_r(Mstar, gamma, rinf_val)
+    ans = sigma_inf/(H*rho_inf*aStarGW_ecc)
     return ans/31536000/1e9, rinf_val
 
 # ## Parameters and functions for Illustris
@@ -288,7 +340,7 @@ def cumulative_merg_ill(mu_min, mu_max, Mstar, z):
     ans, err = quad(illus_merg, mu_min, mu_max, args = (Mstar,z))
     return ans
 
-def i_prob_Illustris(Mstar, Mtot, q, min_freq):
+def i_prob_Illustris(Mstar, Mtot, q, e0, min_freq):
     """
     Probability that this galaxy contains a binary in the PTA band
     """
@@ -300,7 +352,7 @@ def i_prob_Illustris(Mstar, Mtot, q, min_freq):
     
     #Mstar = Mstar*MzMnow(mu, sigma) # scale M* according to Figure 7 of de Lucia and Blaizot 2007
     MstarZ = 0.7*Mstar
-    hardening_t, r_inf_here = t_hard(MstarZ,q,gamma,Mtot)
+    hardening_t, r_inf_here = t_hard_ecc(MstarZ,q,gamma,Mtot,e0)
     friction_t = tfric(MstarZ,M2)
     timescale = hardening_t + friction_t  # Gyrs 
     
@@ -327,18 +379,18 @@ def i_prob_Illustris(Mstar, Mtot, q, min_freq):
 # ### Choose a galaxy catalog 
 
 # this is the revised list from Jenny with galaxy names in the final column
-catalog = np.loadtxt("2mass_GRP_earlyv3-25name_noStar2.lst", usecols = (1,2,3,4))
+catalog = np.loadtxt("../galaxy_data/2mass_galaxies.lst", usecols = (1,2,3,4))
 
-cat_name = np.genfromtxt("2mass_GRP_earlyv3-25name_noStar2.lst",  usecols=(5), dtype='str')
+cat_name = np.genfromtxt("../galaxy_data/2mass_galaxies.lst",  usecols=(5), dtype='str')
 
 
 # ## List of supermassive black holes with dynamic mass measurements
 
-dyn_smbh_name = np.genfromtxt("schutzMa_extension.txt", usecols=(0), dtype='str', skip_header = 2)
-dyn_smbh_mass = np.genfromtxt("schutzMa_extension.txt", usecols = (4), skip_header = 2)
+dyn_smbh_name = np.genfromtxt("../galaxy_data/schutzMa_extension.txt", usecols=(0), dtype='str', skip_header = 2)
+dyn_smbh_mass = np.genfromtxt("../galaxy_data/schutzMa_extension.txt", usecols = (4), skip_header = 2)
 
-ext_catalog = np.loadtxt("added_Mks.lst", usecols = (1,2,3,4,5), skiprows = 2)
-ext_name = np.genfromtxt("added_Mks.lst", usecols=(0), dtype='str', skip_header = 2)
+ext_catalog = np.loadtxt("../galaxy_data/added_Mks.lst", usecols = (1,2,3,4,5), skiprows = 2)
+ext_name = np.genfromtxt("../galaxy_data/added_Mks.lst", usecols=(0), dtype='str', skip_header = 2)
 
 
 #dyn_smbh_mass.shape
@@ -385,7 +437,7 @@ f_min = 1e-9 #
 
 # ## Create multiple gravitational-wave sky realizations from the catalog.
 
-real_tot = 2000 # number of realizations
+real_tot = 1000 # number of realizations
 tot_gal_counter = np.zeros([real_tot]) # keeps track of the total number of galaxies for each realization (loop)
 
 # multiple realizations of the Universe
@@ -406,6 +458,7 @@ for j in range(real_tot):
     # initialize mass arrays
     chirp_mass_vec = np.zeros([gal_no])
     q_choice = np.zeros([gal_no])
+    e0=0.6
     
     m_bulge = Mk2mStar(k_mag) # inferred M* mass from k-band luminosity, Cappellari (2013)
     tot_mass = Mbh2Mbulge(m_bulge) # M-Mbulge McConnell & Ma
@@ -427,7 +480,7 @@ for j in range(real_tot):
      
      # prob of binary being in PTA band
     for zz in range(gal_no):
-        p_i_vec[zz], z_loop[zz], T_zLoop[zz], mergRate_loop[zz], t2c_loop[zz],  r_inf_loop[zz], friction_t_loop[zz], hardening_t_loop[zz] = i_prob_Illustris(m_bulge[zz], tot_mass[zz], q_choice[zz], f_min) 
+        p_i_vec[zz], z_loop[zz], T_zLoop[zz], mergRate_loop[zz], t2c_loop[zz],  r_inf_loop[zz], friction_t_loop[zz], hardening_t_loop[zz] = i_prob_Illustris(m_bulge[zz], tot_mass[zz], q_choice[zz], e0, f_min) 
 
     # number of stalled binaries
     num_zeros = (p_i_vec == 0).sum()
@@ -488,11 +541,11 @@ for j in range(real_tot):
       
     # Save realization
     
-    dest_file = "../prelim_results/realization_skies/hercules/herc_"+str(j)+str("_")+str(filename)
+#    dest_file = "../prelim_results/realization_skies/hercules/herc_"+str(j)+str("_")+str(filename)
     
-    result_file = open(dest_file, "a") # the a+ allows you to create the file and write to it.
+    result_file = open(filename, "a") # the a+ allows you to create the file and write to it.
     for R, D, F, S, C, Q, G, L, M, P, I, TZ, MR, T2C, Z, RE, FRI, HAR in zip(RA_tot, DEC_tot, gw_freq_vec, strain_vec, mchirp_rec,q_rec, gal_cat_name, dist_list, mstar_list, save_p, gal_choice, T_z_list, mergRate_list, t2c_list, z_list, r_inf_list, friction_list, hardening_list):
-        result_file.write('{0} {1} {2} {3} {4} {5} {6} {7} {8} {9} {10} {11} {12} {13} {14} {15} {16} {17} {18}\n'.format(R, D, F, S, C, Q, G, L, M, P, I, TZ, MR, T2C, Z, RE, FRI, HAR, num_zeros)) 
+        result_file.write('{0} {1} {2} {3} {4} {5} {6} {7} {8} {9} {10} {11} {12} {13} {14} {15} {16} {17} {18} {19} {20}\n'.format(j, R, D, F, S, C, Q, G, L, M, P, I, TZ, MR, T2C, Z, RE, FRI, HAR, num_zeros, no_of_samples)) 
     result_file.close()
 
 # Helpful hint: if you want to count the number of realizations in your directory, do
